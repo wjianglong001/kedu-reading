@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">刻读</string>
+    <string name="title_activity_main">刻读</string>
+    <string name="package_name">com.kedu.reading</string>
+    <string name="custom_url_scheme">com.kedu.reading</string>
+</resources>
