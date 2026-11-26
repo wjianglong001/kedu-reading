@@ -8,14 +8,13 @@ import {
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { jsonrepair } from 'jsonrepair'
+import { sourcedDraftSchemas } from '../src/articleSources'
 import { createLiveMatrix, type LiveMatrixMode, type LiveTestCase } from '../src/liveTestMatrix'
 import { articleGenerationPrompt, questionGenerationPrompt, studyGenerationPrompt, validationPrompt } from '../src/prompts'
 import {
   articleDraftSchema,
   draftSchema,
-  questionBatchSchema,
   questionsDraftSchema,
-  studyDraftSchema,
   validationSchema,
   type GeneratedArticleDraft,
 } from '../src/schemas'
@@ -359,8 +358,9 @@ async function chatStage(options: {
   maxOutputTokens: number
   timeoutMs: number
   prompt: string
-  schema: typeof articleDraftSchema | typeof questionBatchSchema | typeof questionsDraftSchema | typeof studyDraftSchema | typeof validationSchema
+  schema: typeof articleDraftSchema | ReturnType<typeof sourcedDraftSchemas>['questions' | 'study'] | typeof validationSchema
   config?: TrainingConfig
+  temperature?: number
   thinking?: 'adaptive' | 'disabled'
 }): Promise<{ result: StageResult; parsed?: unknown }> {
   const body = {
@@ -372,7 +372,7 @@ async function chatStage(options: {
     stream: false,
     thinking: { type: options.thinking || 'adaptive' },
     reasoning_split: true,
-    temperature: 0.55,
+    temperature: options.temperature ?? 0.55,
     max_completion_tokens: options.maxOutputTokens,
   }
 
@@ -572,7 +572,7 @@ async function main() {
     })
     const questionBatches: Array<Awaited<ReturnType<typeof chatStage>>> = []
     let study: Awaited<ReturnType<typeof chatStage>> | undefined
-    let merged: unknown
+    let merged: ReturnType<typeof draftSchema.parse> | undefined
     if (article.result.outcome === 'pass' && article.parsed) {
       const articleDraft = article.parsed as GeneratedArticleDraft
       if (args.delayMs) await wait(args.delayMs)
@@ -581,8 +581,8 @@ async function main() {
       for (const batch of [{ start: 1, count: firstCount }, { start: firstCount + 1, count: testCase.config.questionCount - firstCount }]) {
         const generated = await chatStage({
           apiKey, model, maxOutputTokens: args.maxOutputTokens, timeoutMs: args.timeoutMs,
-          prompt: questionGenerationPrompt(articleDraft, testCase.config, batch.start, batch.count, existing), schema: questionBatchSchema,
-          thinking: 'adaptive',
+          prompt: questionGenerationPrompt(articleDraft, testCase.config, batch.start, batch.count), schema: sourcedDraftSchemas(articleDraft).questions,
+          thinking: 'disabled', temperature: 0.4,
         })
         questionBatches.push(generated)
         if (generated.parsed) existing = [...existing, ...(generated.parsed as { questions: typeof existing }).questions]
@@ -591,7 +591,7 @@ async function main() {
       if (args.delayMs) await wait(args.delayMs)
       study = await chatStage({
         apiKey, model, maxOutputTokens: args.maxOutputTokens, timeoutMs: args.timeoutMs,
-        prompt: studyGenerationPrompt(articleDraft, testCase.config), schema: studyDraftSchema,
+        prompt: studyGenerationPrompt(articleDraft, testCase.config), schema: sourcedDraftSchemas(articleDraft).study,
         thinking: 'disabled',
       })
       if (existing.length === testCase.config.questionCount && study.parsed) {
@@ -608,6 +608,8 @@ async function main() {
         maxOutputTokens: args.maxOutputTokens,
         timeoutMs: args.timeoutMs,
         prompt: validationPrompt(merged, testCase.config, 1),
+        thinking: 'disabled',
+        temperature: 0.2,
         schema: validationSchema,
       })).result
     }

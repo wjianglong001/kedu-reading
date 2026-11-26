@@ -33,7 +33,7 @@ import { AnswerQuestion, ReaderWorkspace } from './ReaderWorkspace'
 import SampleReading from './SampleReading'
 import { addVocabularyIfMissing, db, normalizeVocabularyWord } from './db'
 import { credentialStore } from './credentialStore'
-import { createAnswerReview, createValidatedTraining, GenerationCancelledError } from './agentOrchestrator'
+import { createAnswerReview, createValidatedTraining, GenerationCancelledError, RevisionPendingError } from './agentOrchestrator'
 import { verifyApiKey, MINIMAX_MODEL } from './minimax'
 import { annotationAnchor, lookupReadingText, LookupRequestGate, normalizeAnnotationText, passageSentences, tokenizeEnglish, type AnnotationKind } from './readingLookup'
 import {
@@ -44,6 +44,7 @@ import {
   type Focus,
   type GenerationProgress,
   type PassageLength,
+  type PendingRevision,
   type ReadingAnnotation,
   type Topic,
   type TrainingConfig,
@@ -62,7 +63,7 @@ const tabs: Array<{ id: Tab; label: string; icon: typeof House }> = [
   { id: 'me', label: '我的', icon: UserCircle },
 ]
 
-const stageOrder: GenerationProgress['stage'][] = ['article', 'questions', 'study', 'validating', 'revising', 'saving']
+const stageOrder: GenerationProgress['stage'][] = ['article', 'questions', 'validating', 'revising', 'saving']
 
 function formatDate(iso: string) {
   return new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(iso))
@@ -163,18 +164,24 @@ function Segmented<T extends string | number>({ label, value, options, onChange 
   )
 }
 
-function ConfigurePage({ config, setConfig, hasKey, generationBusy, onGenerate, onGoKey }: {
+function ConfigurePage({ config, setConfig, hasKey, generationBusy, onGenerate, onGoKey, pending, onResume }: {
   config: TrainingConfig
   setConfig: (config: TrainingConfig) => void
   hasKey: boolean
   generationBusy: boolean
   onGenerate: () => void
   onGoKey: () => void
+  pending: PendingRevision[]
+  onResume: (item: PendingRevision) => void
 }) {
   const patch = <K extends keyof TrainingConfig>(key: K, value: TrainingConfig[K]) => setConfig({ ...config, [key]: value })
   return (
     <Screen screenKey="configure">
-      <PageHeader title="设置阅读训练" description="选择难度和主题，生成一套带原文解析的阅读题。" />
+      <PageHeader title="设置阅读训练" description="选择难度和主题，点一次生成，审校通过后自动进入作答。" />
+      {pending.map(item => <div className="notice" key={item.id}><div>
+        <strong>{item.draft.title}</strong><p>{item.config.topic} · {item.config.questionCount} 题 · 草稿待修订</p>
+        <button className="text-button" disabled={generationBusy} onClick={hasKey ? () => onResume(item) : onGoKey}>{hasKey ? '继续修订这套题' : '设置 API Key'}</button>
+      </div></div>)}
       {generationBusy && (
         <div className="notice"><CircleNotch className="spinner" /><div><strong>上一任务正在安全结束</strong><p>当前模型请求返回后会立即停止，不会开始下一轮审校。</p></div></div>
       )}
@@ -203,9 +210,10 @@ function ConfigurePage({ config, setConfig, hasKey, generationBusy, onGenerate, 
   )
 }
 
-function GenerationPage({ progress, error, onRetry, onCancel }: {
+function GenerationPage({ progress, error, canResume, onRetry, onCancel }: {
   progress?: GenerationProgress
   error?: string
+  canResume: boolean
   onRetry: () => void
   onCancel: () => void
 }) {
@@ -214,19 +222,18 @@ function GenerationPage({ progress, error, onRetry, onCancel }: {
     : 0
   const visibleStages = [
     { stage: 'article', title: '文章 Agent', detail: '正文、译文与句界' },
-    { stage: 'questions', title: '题目 Agent', detail: '深度推理题目与证据' },
-    { stage: 'study', title: '学习内容 Agent', detail: '生词与长难句' },
+    { stage: 'questions', title: '出题与学习资料', detail: '同时准备题目、原文证据和词句解析' },
     { stage: 'validating', title: '审校 Agent', detail: '答案唯一性、证据与难度' },
     { stage: 'saving', title: '写入本机', detail: '通过后保存完整训练' },
   ] as const
   return (
     <Screen screenKey="generating">
-      <PageHeader eyebrow="双 Agent 工作台" title={error ? '这次没有通过' : '正在校成一套好题'} description={error ? '没有把未通过审校的题目交给你。' : '通常需要数分钟；复杂配置或繁忙时可能更久，请保持应用在前台和网络连接。'} />
+      <PageHeader eyebrow="双 Agent 工作台" title={error ? (canResume ? '这套题还需修订' : '这次生成已停止') : '正在校成一套好题'} description={error ? (canResume ? '草稿已保存在本机。继续修订会调用模型修题，并再审一轮。' : '请查看下方原因。') : '请保持应用在前台和网络连接。'} />
       {error ? (
         <div className="generation-error">
           <WarningCircle weight="duotone" />
-          <h2>生成已停止</h2><p>{error}</p>
-          <div className="button-row"><button className="secondary-button" onClick={onCancel}>返回设置</button><button className="primary-button" onClick={onRetry}>重新生成</button></div>
+          <h2>{canResume ? '待解决的问题' : '生成已停止'}</h2><p>{error}</p>
+          <div className="button-row"><button className="secondary-button" onClick={onCancel}>返回设置</button><button className="primary-button" onClick={onRetry}>{canResume ? '继续修订这套题' : '重新生成'}</button></div>
         </div>
       ) : (
         <div className="agent-sheet">
@@ -244,7 +251,7 @@ function GenerationPage({ progress, error, onRetry, onCancel }: {
               </li>
             })}
           </ol>
-          {progress && progress.validationAttempt > 0 && <p className="attempt-note">审校轮次 {progress.validationAttempt} / 3</p>}
+          {progress && progress.validationAttempt > 0 && <p className="attempt-note">第 {progress.validationAttempt} 轮审校</p>}
           <button className="text-button cancel-button" onClick={onCancel}>回到设置</button>
         </div>
       )}
@@ -649,6 +656,8 @@ export default function App() {
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [progress, setProgress] = useState<GenerationProgress>()
   const [generationError, setGenerationError] = useState('')
+  const [pendingRevisions, setPendingRevisions] = useState<PendingRevision[]>([])
+  const [retryPending, setRetryPending] = useState<PendingRevision>()
   const [generationBusy, setGenerationBusy] = useState(false)
   const [reviewLoading, setReviewLoading] = useState(false)
   const [lookupOpen, setLookupOpen] = useState(false)
@@ -659,12 +668,14 @@ export default function App() {
   const [elapsed, setElapsed] = useState(0)
 
   const reload = async () => {
-    const [savedSets, savedAttempts, savedWords] = await Promise.all([
+    const [savedSets, savedAttempts, savedWords, pending] = await Promise.all([
       db.trainingSets.orderBy('createdAt').reverse().toArray(),
       db.attempts.orderBy('completedAt').reverse().toArray(),
       db.vocabulary.orderBy('createdAt').reverse().toArray(),
+      db.pendingRevisions.orderBy('report.checkedAt').reverse().toArray(),
     ])
     setSets(savedSets); setAttempts(savedAttempts); setWords(savedWords)
+    setPendingRevisions(pending)
   }
 
   useEffect(() => { credentialStore.get().then(setStoredKey); reload() }, [])
@@ -684,18 +695,24 @@ export default function App() {
     }
     window.scrollTo(0, 0)
   }
-  const generate = async () => {
+  const generate = async (pending?: PendingRevision) => {
     if (generationBusy) return
     const runId = ++generationRunId.current
     const isCancelled = () => generationRunId.current !== runId
     setGenerationBusy(true)
+    setRetryPending(undefined)
     setPracticeMode('generating'); setGenerationError(''); setProgress(undefined)
     try {
-      const set = await createValidatedTraining(config, (next) => { if (!isCancelled()) setProgress(next) }, isCancelled)
+      const set = await createValidatedTraining(pending?.config ?? config, (next) => { if (!isCancelled()) setProgress(next) }, isCancelled, pending)
       if (isCancelled()) return
       setActiveSet(set); setAnswers({}); setElapsed(0); startedAt.current = Date.now(); setPracticeMode('exam'); await reload(); window.scrollTo(0, 0)
     } catch (error) {
-      if (!(error instanceof GenerationCancelledError) && !isCancelled()) setGenerationError(error instanceof Error ? error.message : '生成失败，请稍后重试')
+      const saved = await db.pendingRevisions.orderBy('report.checkedAt').reverse().toArray().catch(() => pendingRevisions)
+      setPendingRevisions(saved)
+      if (!(error instanceof GenerationCancelledError) && !isCancelled()) {
+        setRetryPending(error instanceof RevisionPendingError ? error.pending : saved.find(item => item.id === pending?.id))
+        setGenerationError(error instanceof Error ? error.message : '生成失败，请稍后重试')
+      }
     } finally {
       setGenerationBusy(false)
     }
@@ -762,8 +779,8 @@ export default function App() {
 
   const content = sampleOpen ? <SampleReading onBack={() => setSampleOpen(false)} onTrain={startConfig} />
     : tab === 'home' ? <HomePage config={config} attempts={attempts} vocabulary={words} activeTitle={practiceMode === 'exam' ? activeSet?.title : undefined} inProgress={practiceMode === 'generating'} onStart={startConfig} onSample={() => { setSampleOpen(true); window.scrollTo(0, 0) }} onWords={() => navigateTab('vocabulary')} onHistory={() => navigateTab('history')} />
-    : tab === 'practice' ? practiceMode === 'configure' ? <ConfigurePage config={config} setConfig={setConfig} hasKey={Boolean(storedKey)} generationBusy={generationBusy} onGenerate={generate} onGoKey={() => { navigateTab('me'); setReturnToConfig(true) }} />
-      : practiceMode === 'generating' ? <GenerationPage progress={progress} error={generationError} onRetry={generate} onCancel={cancelGeneration} />
+    : tab === 'practice' ? practiceMode === 'configure' ? <ConfigurePage config={config} setConfig={setConfig} hasKey={Boolean(storedKey)} generationBusy={generationBusy} onGenerate={() => generate()} pending={pendingRevisions} onResume={generate} onGoKey={() => { navigateTab('me'); setReturnToConfig(true) }} />
+      : practiceMode === 'generating' ? <GenerationPage progress={progress} error={generationError} canResume={Boolean(retryPending)} onRetry={() => generate(retryPending)} onCancel={cancelGeneration} />
       : practiceMode === 'exam' && activeSet ? <ExamPage set={activeSet} answers={answers} setAnswers={setAnswers} elapsed={elapsed} words={words} closeLookupSignal={closeLookupSignal} onLookupState={setLookupOpen} onAddVocabulary={addVocabulary} onSubmit={submit} onBack={() => { setLookupOpen(false); setTab('home'); window.scrollTo(0, 0) }} />
       : activeSet && activeAttempt ? <ResultPage set={activeSet} attempt={activeAttempt} reviewLoading={reviewLoading} onDone={() => { setPracticeMode('configure'); navigateTab('home') }} /> : null
     : tab === 'vocabulary' ? <VocabularyPage words={words} onStatus={updateWord} />

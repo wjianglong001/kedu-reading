@@ -43,6 +43,14 @@ describe('MiniMax response parsing', () => {
   it('repairs truncated closing brackets locally', () => {
     expect(extractJson('{"items":[{"id":1}')).toEqual({ items: [{ id: 1 }] })
   })
+
+  it('restores missing sentence-list brackets without changing quoted English or Chinese', () => {
+    const raw = '{"passage":[{"sentences":"First, a question.",\n"She said \\"yes\\"."],"translation":"她说“是”."},{"sentences":"Last sentence."],"translation":"最后一句。"}]}'
+    expect(extractJson(raw)).toEqual({ passage: [
+      { sentences: ['First, a question.', 'She said "yes".'], translation: '她说“是”.' },
+      { sentences: ['Last sentence.'], translation: '最后一句。' },
+    ] })
+  })
 })
 
 describe('agent schemas', () => {

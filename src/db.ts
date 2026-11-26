@@ -1,8 +1,9 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Attempt, ReadingAnnotation, TrainingSet, VocabularyItem } from './types'
+import type { Attempt, PendingRevision, ReadingAnnotation, TrainingSet, VocabularyItem } from './types'
 
 class KeduDatabase extends Dexie {
   trainingSets!: EntityTable<TrainingSet, 'id'>
+  pendingRevisions!: EntityTable<PendingRevision, 'id'>
   attempts!: EntityTable<Attempt, 'id'>
   vocabulary!: EntityTable<VocabularyItem, 'id'>
   readingAnnotations!: EntityTable<ReadingAnnotation, 'id'>
@@ -30,21 +31,34 @@ class KeduDatabase extends Dexie {
         .filter((annotation) => typeof annotation.anchor !== 'string' || !annotation.anchor)
         .delete()
     })
+    this.version(4).stores({ pendingRevisions: 'id, report.checkedAt' })
   }
 }
 
 export const db = new KeduDatabase()
 
 export async function saveTrainingSet(set: TrainingSet) {
-  await db.transaction('rw', db.trainingSets, db.vocabulary, async () => {
+  return db.transaction('rw', db.trainingSets, db.vocabulary, db.pendingRevisions, async () => {
+    const existing = await db.trainingSets.get(set.id)
+    if (existing) return existing
     await db.trainingSets.put(set)
     await db.vocabulary.bulkPut(set.vocabulary)
+    await db.pendingRevisions.delete(set.id)
+    return set
+  })
+}
+
+export async function savePendingRevision(pending: PendingRevision) {
+  await db.transaction('rw', db.trainingSets, db.pendingRevisions, async () => {
+    if (await db.trainingSets.get(pending.id)) return
+    const previous = await db.pendingRevisions.get(pending.id)
+    if (!previous || previous.report.attempt <= pending.report.attempt) await db.pendingRevisions.put(pending)
   })
 }
 
 export async function clearLocalLearningData() {
-  await db.transaction('rw', db.trainingSets, db.attempts, db.vocabulary, db.readingAnnotations, async () => {
-    await Promise.all([db.trainingSets.clear(), db.attempts.clear(), db.vocabulary.clear(), db.readingAnnotations.clear()])
+  await db.transaction('rw', [db.trainingSets, db.attempts, db.vocabulary, db.readingAnnotations, db.pendingRevisions], async () => {
+    await Promise.all([db.trainingSets.clear(), db.attempts.clear(), db.vocabulary.clear(), db.readingAnnotations.clear(), db.pendingRevisions.clear()])
   })
 }
 

@@ -78,6 +78,7 @@ export interface ValidationIssue {
   target: string
   message: string
   suggestion: string
+  replacement?: string
 }
 
 export interface ValidationReport {
@@ -86,6 +87,13 @@ export interface ValidationReport {
   issues: ValidationIssue[]
   checkedAt: string
   attempt: number
+}
+
+export interface PendingRevision {
+  id: string
+  config: TrainingConfig
+  draft: import('./schemas').GeneratedDraft
+  report: ValidationReport
 }
 
 export interface TrainingSet {
@@ -119,7 +127,7 @@ export interface Attempt {
 }
 
 export interface GenerationProgress {
-  stage: 'article' | 'questions' | 'study' | 'validating' | 'revising' | 'saving'
+  stage: 'article' | 'questions' | 'validating' | 'revising' | 'saving'
   label: string
   detail: string
   validationAttempt: number

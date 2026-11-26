@@ -143,6 +143,10 @@ export function extractJson(raw: string): unknown {
     .trim()
 
   const candidates = new Set<string>([unfenced])
+  // The writer occasionally omits the opening bracket of a sentences array.
+  // Only insert it when a complete list of JSON strings and its closing ] exist.
+  const sentenceLists = unfenced.replace(/("sentences"\s*:\s*)("(?:\\.|[^"\\])*"(?:\s*,\s*"(?:\\.|[^"\\])*")*\s*\])/g, '$1[$2')
+  if (sentenceLists !== unfenced) candidates.add(sentenceLists)
   const objectStart = unfenced.indexOf('{')
   const objectEnd = unfenced.lastIndexOf('}')
   if (objectStart >= 0 && objectEnd > objectStart) candidates.add(unfenced.slice(objectStart, objectEnd + 1))
